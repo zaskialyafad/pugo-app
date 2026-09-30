@@ -138,6 +138,8 @@ async function refresh(silent){
   db.products=d.products||[];
   db.sales=(d.sales||[]).sort((a,b)=>b.ts-a.ts);
   db.exp=d.exp||[];
+  db.promos=d.promos||[];
+  db.po=d.po||[];
   if(d.settings){if(d.settings.store)cfg.store=d.settings.store;if(d.settings.qris!==undefined)cfg.qris=d.settings.qris;saveCfg()}
   lastSync=Date.now();
   return true;
@@ -170,16 +172,32 @@ boot();
 
 // ===== NAV / HEADER =====
 function show(){
- $('#nav').innerHTML=[['kasir','🛒','Kasir'],['produk','🥤','Produk'],['laporan','📊','Laporan'],['exp','💸','Biaya'],['set','⚙️','Setelan']].map(([k,c,n])=>`<button class="${tab==k?'on':''}" onclick="tab='${k}';show();scrollTo(0,0)"><i>${c}</i>${n}</button>`).join('');
+ $('#nav').innerHTML=[['kasir','🛒','Kasir'],['produk','🥤','Produk'],['po','📅','PO'],['promo','🎟️','Promo'],['laporan','📊','Laporan'],['exp','💸','Biaya'],['set','⚙️','Setelan']].map(([k,c,n])=>`<button class="${tab==k?'on':''}" onclick="tab='${k}';show();scrollTo(0,0)"><i>${c}</i>${n}</button>`).join('');
  const td=db.sales.filter(x=>new Date(x.ts).toDateString()==new Date().toDateString());
  $('#chip').innerHTML='Hari ini<b>'+R(td.reduce((a,x)=>a+x.total,0))+'</b>'+(queue.length?' <span class="chip2">⏳'+queue.length+'</span>':'');
  if(!cfg.backendUrl&&tab!=='set'){$('#v').innerHTML=`<div class="card emp mu"><img src="${MC}">Sambungkan dulu ke Google Sheets<br>di tab Setelan supaya tim bisa akses data yang sama.<br><br><button class="btn" onclick="tab='set';show()">Ke Setelan</button></div>`;return}
  if(booting){$('#v').innerHTML=`<div class="card emp mu"><img src="${MC}">Memuat data dari Google Sheets…</div>`;return}
- ({kasir:vKasir,produk:vProduk,laporan:vLaporan,exp:vExp,set:vSet})[tab]()
+ ({kasir:vKasir,produk:vProduk,po:vPO,promo:vPromo,laporan:vLaporan,exp:vExp,set:vSet})[tab]()
 }
 
 // ===== KASIR =====
 const total=()=>db.products.reduce((s,p)=>s+(cart[p.id]||0)*p.price,0),count=()=>Object.values(cart).reduce((a,b)=>a+b,0);
+function promoExpired(p){return p.expiry&&p.expiry<today()}
+function promoLimitReached(p){return p.limit&&(+p.used||0)>=+p.limit}
+function promoUsable(p){return p.active&&!promoExpired(p)&&!promoLimitReached(p)}
+function promoDiscount(p,subtotal){
+ if(p.type=='percent')return subtotal*(+p.value/100);
+ if(p.type=='amount')return Math.min(+p.value,subtotal);
+ if(p.type=='bogo'){const qty=cart[p.productId]||0;if(!qty)return 0;const grp=(+p.buyQty)+(+p.getQty);if(grp<=0)return 0;
+  const groups=Math.floor(qty/grp),free=groups*(+p.getQty);const prod=db.products.find(x=>x.id==p.productId);return free*(prod?prod.price:0)}
+ return 0}
+function calcTotals(){const subtotal=total();let discount=0,applied=[];
+ (db.promos||[]).filter(p=>!p.code&&promoUsable(p)).forEach(p=>{const d=promoDiscount(p,subtotal);if(d>0){discount+=d;applied.push(Object.assign({},p,{amount:d}))}});
+ const code=(window._voucherCode||'').trim();
+ if(code){const p=(db.promos||[]).find(x=>x.code&&x.code.toLowerCase()==code.toLowerCase());
+  if(p&&promoUsable(p)){const d=promoDiscount(p,subtotal);if(d>0){discount+=d;applied.push(Object.assign({},p,{amount:d}))}}}
+ discount=Math.min(discount,subtotal);
+ return{subtotal,discount,total:subtotal-discount,applied}}
 function vKasir(){if(!db.products.length){$('#v').innerHTML=`<div class="card emp mu"><img src="${MC}">Belum ada produk.<br>Tambahkan dulu di tab Produk ya!<br><br><button class="btn" onclick="tab='produk';show()">Ke Produk</button></div>`;return}
  $('#v').innerHTML=`<input class="srch" placeholder="🔍 Cari produk…" value="${esc(q)}" oninput="q=this.value;grid()"><div class="grid" id="gd"></div>`;grid()}
 function grid(){const el=$('#gd');if(!el)return;const k=q.trim().toLowerCase();
@@ -189,26 +207,45 @@ function bar(){const b=$('#bar');if(!count()||tab!='kasir'){b.classList.add('hid
  b.innerHTML=(cartOpen?`<div class="items">${db.products.filter(p=>cart[p.id]).map(p=>`<div class="row" style="margin-bottom:6px"><span>${esc(p.name)}<br><span class="mu">${R(p.price)} × ${cart[p.id]} = ${R(p.price*cart[p.id])}</span></span><span class="q"><button onclick="add('${p.id}',-1)">−</button><b>${cart[p.id]}</b><button onclick="add('${p.id}',1)">+</button></span></div>`).join('')}</div>`:'')+
  `<div class="row"><div onclick="cartOpen=!cartOpen;bar()" style="flex:1;cursor:pointer"><span class="mu">${count()} item · ${cartOpen?'tutup ▾':'lihat ▴'}</span><br><b style="font-size:21px;color:var(--mr)">${R(total())}</b></div><button class="btn g" onclick="cart={};cartOpen=false;show()">Batal</button><button class="btn big" onclick="pay()">Bayar</button></div>`}
 function pay(){method='Tunai';window._tn='';const IC={Tunai:'💵',QRIS:'📱',Transfer:'🏦',Debit:'💳'};
- mod(`<div class="ph"><span class="mu">Total tagihan</span><div class="tt">${R(total())}</div></div><div class="seg">${Object.keys(IC).map(m=>`<button data-m="${m}" onclick="method='${m}';payUI()">${IC[m]}<br>${m}</button>`).join('')}</div><div id="pu"></div>`);payUI()}
-function payUI(){const T=total();let h='';
- document.querySelectorAll('.seg button').forEach(b=>b.classList.toggle('on',b.dataset.m==method));
+ mod(`<div class="seg">${Object.keys(IC).map(m=>`<button data-m="${m}" onclick="method='${m}';payUI()">${IC[m]}<br>${m}</button>`).join('')}</div><div id="pu"></div>`);payUI()}
+function applyVoucher(){window._voucherCode=$('#vc').value.trim();payUI()}
+function payUI(){document.querySelectorAll('.seg button').forEach(b=>b.classList.toggle('on',b.dataset.m==method));
+ const{subtotal,discount,total:T,applied}=calcTotals();
+ const code=(window._voucherCode||'').trim(),manualOk=applied.some(p=>p.code);
+ const vcMsg=code?(manualOk?'✅ Voucher diterapkan':'❌ Kode tidak berlaku, kedaluwarsa, atau sudah habis'):'';
+ const autoApplied=applied.filter(p=>!p.code);
+ const poNote=window._activePO?(()=>{const po=(db.po||[]).find(x=>x.id==window._activePO);if(!po)return'';const sisa=Math.max(0,(po.total||0)-(+po.deposit||0));return `<div class="card" style="margin-bottom:10px;background:var(--gr)"><b>📅 Pesanan: ${esc(po.customer)}</b><br><span class="mu">DP diterima ${R(po.deposit||0)} · sisa tagihan ${R(sisa)}</span></div>`})():'';
+ const codeablePromos=(db.promos||[]).filter(p=>p.code&&promoUsable(p));
+ let top=poNote+`<div class="ph"><span class="mu">Total tagihan</span><div class="tt">${R(T)}</div>${discount>0?`<div class="mu" style="margin-top:2px">Subtotal ${R(subtotal)} · Hemat ${R(discount)}</div>`:''}</div>
+ ${codeablePromos.length?`<div class="row" style="gap:6px;margin-bottom:4px"><select id="vcSel" style="flex:1;margin:0" onchange="if(this.value){window._voucherCode=this.value;payUI()}"><option value="">🎟️ Pilih promo…</option>${codeablePromos.map(p=>`<option value="${esc(p.code)}" ${code.toUpperCase()===p.code.toUpperCase()?'selected':''}>${esc(p.name)} (${esc(p.code)})</option>`).join('')}</select></div>`:''}
+ <div class="row" style="gap:6px;margin-bottom:4px"><input id="vc" placeholder="atau ketik kode voucher" value="${esc(code)}" style="flex:1;margin:0" onkeydown="if(event.key=='Enter'){event.preventDefault();applyVoucher()}"><button class="btn g" onclick="applyVoucher()">Terapkan</button></div>
+ ${vcMsg?`<p class="mu" style="margin:0 0 8px">${vcMsg}</p>`:''}${autoApplied.length?`<p class="mu" style="margin:0 0 8px">${autoApplied.map(p=>'🎉 '+esc(p.name)+' (−'+R(p.amount)+')').join('<br>')}</p>`:''}`;
+ let h='';
  if(method=='Tunai'){const o=new Set([T]);[5e3,1e4,2e4,5e4,1e5].forEach(u=>o.add(Math.ceil(T/u)*u));
   h=`<label>Uang diterima</label><div class="chips">${[...o].sort((a,b)=>a-b).slice(0,4).map(v=>`<button onclick="$('#cash').value=${v};chg()">${v==T?'Uang pas':R(v)}</button>`).join('')}</div><input id="cash" type="number" inputmode="numeric" placeholder="Ketik nominal" oninput="chg()"><div class="row"><span>Kembalian</span><span class="kem" id="chg">Rp0</span></div>`}
  else if(method=='QRIS'){h=cfg.qris?`<div id="qr"></div><p class="mu" style="text-align:center;font-size:15px">Minta pembeli scan, nominal <b>${R(T)}</b> sudah terisi otomatis</p>`:'<div class="card mu">QRIS belum diatur. Tempel kode QRIS toko di tab Setelan.</div>'}
  else h='<p class="mu" style="text-align:center;font-size:15px">Pastikan pembayaran sudah diterima sebelum menekan Selesai.</p>';
- $('#pu').innerHTML=h+`<label style="display:block;margin-top:12px">Keterangan (opsional)</label><input id="tn" value="${esc(window._tn||'')}" oninput="window._tn=this.value" placeholder="mis. nama pembeli, catatan"><div class="row" style="margin-top:6px"><button class="btn g" onclick="cl()">Batal</button><button class="btn big" style="flex:1" onclick="done()">Selesai & Struk</button></div>`;
+ const doneLabel=method=='QRIS'?'✓ Sudah Diterima, Selesai':'✓ Selesai';
+ $('#pu').innerHTML=top+h+`<label style="display:block;margin-top:12px">Keterangan (opsional)</label><input id="tn" value="${esc(window._tn||'')}" oninput="window._tn=this.value" placeholder="mis. nama pembeli, catatan"><div class="row" style="margin-top:6px"><button class="btn g" onclick="window._activePO=null;cl()">Batal</button><button class="btn big" style="flex:1" onclick="done()">${doneLabel}</button></div>`;
  if(method=='QRIS'&&cfg.qris){try{new QRCode($('#qr'),{text:qrisDyn(cfg.qris,T),width:320,height:320,correctLevel:QRCode.CorrectLevel.M})}catch(e){$('#qr').textContent='Kode QRIS tidak valid'}}}
-function chg(){const c=+$('#cash').value||0;$('#chg').textContent=R(Math.max(0,c-total()))}
-async function done(){const T=total();let paid=T;if(method=='Tunai'){paid=+$('#cash').value||T;if(paid<T){toast('Uang kurang');return}}
- const s={id:uid(),ts:Date.now(),items:db.products.filter(p=>cart[p.id]).map(p=>({name:p.name,price:p.price,qty:cart[p.id]})),total:T,method,paid,note:(window._tn||'').trim(),pic:cfg.pic||''};
- window._tn='';db.sales.unshift(s);cart={};cartOpen=false;receipt(s.id);show();
+function chg(){const c=+$('#cash').value||0;const{total:T}=calcTotals();$('#chg').textContent=R(Math.max(0,c-T))}
+async function done(){const{subtotal,discount,total:T,applied}=calcTotals();let paid=T;if(method=='Tunai'){paid=+$('#cash').value||T;if(paid<T){toast('Uang kurang');return}}
+ const voucherCode=(window._voucherCode||'').trim();
+ const s={id:uid(),ts:Date.now(),items:db.products.filter(p=>cart[p.id]).map(p=>({name:p.name,price:p.price,qty:cart[p.id]})),subtotal,discount,total:T,method,paid,note:(window._tn||'').trim(),pic:cfg.pic||'',promo:applied.map(p=>p.name).join(', '),voucherCode};
+ const usedPromo=applied.find(p=>p.code);if(usedPromo){const pr=db.promos.find(x=>x.id==usedPromo.id);if(pr)pr.used=(+pr.used||0)+1}
+ window._tn='';window._voucherCode='';db.sales.unshift(s);cart={};cartOpen=false;cl();toast('✓ Transaksi selesai · '+R(T)+(discount?' (hemat '+R(discount)+')':''));
+ if(window._activePO){const po=(db.po||[]).find(x=>x.id==window._activePO);if(po){po.status='done';po.saleId=s.id;
+  try{await api('savePO',{data:po})}catch(e){enqueue('savePO',{data:po})}}
+  window._activePO=null}
+ show();
  try{await api('addSale',{data:s})}catch(e){enqueue('addSale',{data:s});toast('Tersimpan offline, akan otomatis terkirim ke Sheets')}
  show()}
 
 function receiptText(s){const w=32,line='-'.repeat(w),pad=(a,b)=>a+' '.repeat(Math.max(1,w-a.length-b.length))+b;
  let t=cfg.store+'\n'+new Date(s.ts).toLocaleString('id-ID')+'\nNo: '+s.id.toUpperCase()+'\n'+line+'\n';
  s.items.forEach(i=>{t+=i.name+'\n'+pad(`${i.qty} x ${R(i.price)}`,R(i.qty*i.price))+'\n'});
- t+=line+'\n'+pad('TOTAL',R(s.total))+'\n'+pad('Bayar ('+s.method+')',R(s.paid))+'\n';if(s.paid>s.total)t+=pad('Kembali',R(s.paid-s.total))+'\n';if(s.note)t+='Ket: '+s.note+'\n';if(s.pic)t+='Kasir: '+s.pic+'\n';return t+line+'\nTerima kasih! 💗\nget your PUGO to go'}
+ t+=line+'\n';if(s.discount){t+=pad('Subtotal',R(s.subtotal))+'\n'+pad('Diskon'+(s.promo?' ('+s.promo+')':''),'-'+R(s.discount))+'\n'}
+ t+=pad('TOTAL',R(s.total))+'\n'+pad('Bayar ('+s.method+')',R(s.paid))+'\n';if(s.paid>s.total)t+=pad('Kembali',R(s.paid-s.total))+'\n';if(s.note)t+='Ket: '+s.note+'\n';if(s.pic)t+='Kasir: '+s.pic+'\n';return t+line+'\nTerima kasih! 💗\nget your PUGO to go'}
 function receipt(id){const s=db.sales.find(x=>x.id==id);const t=receiptText(s);
  window._rt=t;mod(`<pre>${esc(t)}</pre><div class="row"><button class="btn g" onclick="cl()">Tutup</button><button class="btn g" onclick="cp()">Salin</button><button class="btn" onclick="prn()">Cetak</button></div>`)}
 function cp(){try{navigator.clipboard.writeText(window._rt);toast('Struk disalin')}catch(e){toast('Gagal menyalin')}}
@@ -251,7 +288,7 @@ function vLaporan(){const day=new Date().toDateString(),td=db.sales.filter(s=>ne
  <div style="display:flex;gap:6px;margin-bottom:8px">${[['day','Harian'],['week','Mingguan'],['month','Bulanan']].map(([k,n])=>`<button class="btn ${per==k?'':'g'}" style="flex:1" onclick="per='${k}';vLaporan()">${n}</button>`).join('')}</div>
  <div class="list">${G.map(x=>`<div class="card"><div class="row"><b>${x.l}</b><b>${R(x.inc)}</b></div><div style="height:6px;border-radius:9px;background:var(--bd);margin:8px 0 4px"><div style="height:6px;border-radius:9px;background:var(--pr);width:${x.inc/mx*100}%"></div></div><span class="mu">${x.n} transaksi · ${x.pcs} pcs</span></div>`).join('')||'<div class="card mu">Belum ada penjualan</div>'}</div>
  <h4>Pcs terjual per produk</h4><div class="card" style="margin-bottom:12px">${Object.entries(sold).sort((a,b)=>b[1]-a[1]).map(([n,q])=>`<div class="row"><span>${esc(n)}</span><b>${q} pcs</b></div>`).join('')||'<span class="mu">Belum ada penjualan</span>'}</div>
- <h4>Riwayat</h4><div class="list">${db.sales.map(s=>`<div class="card row" onclick="receipt('${s.id}')"><span><b>${R(s.total)}</b> · ${s.method}<br><span class="mu">${new Date(s.ts).toLocaleString('id-ID')} · ${s.items.reduce((a,i)=>a+i.qty,0)} pcs${pendingBadge(s.id)}${s.note?'<br>📝 '+esc(s.note):''}</span></span><span>›</span></div>`).join('')}</div>`}
+ <h4>Riwayat</h4><div class="list">${db.sales.map(s=>`<div class="card row" onclick="receipt('${s.id}')"><span><b>${R(s.total)}</b> · ${s.method}<br><span class="mu">${new Date(s.ts).toLocaleString('id-ID')} · ${s.items.reduce((a,i)=>a+i.qty,0)} pcs${s.discount?' · 🎟️ hemat '+R(s.discount):''}${pendingBadge(s.id)}${s.note?'<br>📝 '+esc(s.note):''}</span></span><span>›</span></div>`).join('')}</div>`}
 
 // ===== PENGELUARAN =====
 const SEED=[{"date":"2026-09-01","cat":"pudot","desc":"Botol 150ml","qty":20,"unit":"pcs","price":699.85,"by":"Zaskia","note":"HArga Asli per pcs Rp 1161, tapi ada diskon dari shopee"},{"date":"2026-09-01","cat":"pudot","desc":"Sago Thailand","qty":1,"unit":"bungkus (100 gr)","price":6593,"by":"Zaskia","note":"HArga Asli 10000  tapi ada diskon dari shopee"},{"date":"2026-09-06","cat":"pudot","desc":"sagu gede","qty":1,"unit":"bungkus","price":9000,"by":"Zaskia","note":""},{"date":"2026-09-06","cat":"pudot","desc":"susu evaporasi","qty":1,"unit":"pcs","price":15000,"by":"Zaskia","note":""},{"date":"2026-09-06","cat":"pudot","desc":"puding susu strawberry nutrijell","qty":1,"unit":"pcs","price":10000,"by":"Zaskia","note":""},{"date":"2026-09-06","cat":"pudot","desc":"susu full cream","qty":1,"unit":"pcs","price":20500,"by":"Zaskia","note":""},{"date":"2026-09-06","cat":"pudot","desc":"skm","qty":1,"unit":"sachet","price":2000,"by":"Zaskia","note":""},{"date":"2026-09-19","cat":"pudot","desc":"botol","qty":50,"unit":"","price":920,"by":"","note":""},{"date":"2026-09-19","cat":"pudot","desc":"stiker Puyu","qty":72,"unit":"pcs","price":152,"by":"Putri","note":""},{"date":"2026-09-19","cat":"","desc":"stiker label","qty":112,"unit":"pcs","price":97,"by":"Putri","note":""},{"date":"2026-09-19","cat":"","desc":"sedotan","qty":1,"unit":"pak","price":13000,"by":"Putri","note":""}];
@@ -330,21 +367,34 @@ function json(o){
   return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
 }
 
+function ds(v){
+  if(v instanceof Date) return Utilities.formatDate(v, 'Asia/Jakarta', 'yyyy-MM-dd');
+  return v || '';
+}
+
 function doGet(e){
   var products = readRows('Produk', ['id','name','price','note']);
-  var salesRaw = readRows('Penjualan', ['id','ts','items','total','method','paid','note','pic']);
+  var salesRaw = readRows('Penjualan', ['id','ts','items','subtotal','discount','total','method','paid','note','pic','promo','voucherCode']);
   var sales = salesRaw.map(function(s){
     var items = [];
     try{ items = JSON.parse(s.items || '[]'); }catch(err){}
-    return { id:s.id, ts:Number(s.ts), items:items, total:Number(s.total), method:s.method, paid:Number(s.paid), note:s.note, pic:s.pic };
+    return { id:s.id, ts:Number(s.ts), items:items, subtotal:Number(s.subtotal)||Number(s.total), discount:Number(s.discount)||0, total:Number(s.total), method:s.method, paid:Number(s.paid), note:s.note, pic:s.pic, promo:s.promo, voucherCode:s.voucherCode };
   });
   var exp = readRows('Pengeluaran', ['id','date','cat','desc','qty','unit','price','by','note']).map(function(x){
-    return { id:x.id, date:x.date, cat:x.cat, desc:x.desc, qty:Number(x.qty), unit:x.unit, price:Number(x.price), by:x.by, note:x.note };
+    return { id:x.id, date:ds(x.date), cat:x.cat, desc:x.desc, qty:Number(x.qty), unit:x.unit, price:Number(x.price), by:x.by, note:x.note };
   });
   var setRows = readRows('Pengaturan', ['key','value']);
   var settings = {};
   setRows.forEach(function(r){ settings[r.key] = r.value; });
-  return json({ products:products, sales:sales, exp:exp, settings:settings });
+  var promos = readRows('Promo', ['id','name','type','value','productId','buyQty','getQty','code','active','expiry','limit','used']).map(function(p){
+    return { id:p.id, name:p.name, type:p.type, value:Number(p.value)||0, productId:p.productId, buyQty:Number(p.buyQty)||0, getQty:Number(p.getQty)||0, code:p.code, active:(p.active===true||p.active==='TRUE'||p.active===1), expiry:ds(p.expiry), limit:Number(p.limit)||0, used:Number(p.used)||0 };
+  });
+  var pos = readRows('PO', ['id','customer','phone','items','note','orderDate','dueDate','deposit','status','saleId']).map(function(po){
+    var items = [];
+    try{ items = JSON.parse(po.items || '[]'); }catch(err){}
+    return { id:po.id, customer:po.customer, phone:po.phone, items:items, note:po.note, orderDate:ds(po.orderDate), dueDate:ds(po.dueDate), deposit:Number(po.deposit)||0, status:po.status, saleId:po.saleId };
+  });
+  return json({ products:products, sales:sales, exp:exp, settings:settings, promos:promos, po:pos });
 }
 
 function saveRow(name, headers, data){
@@ -386,8 +436,10 @@ function doPost(e){
   try{
     var d = JSON.parse(e.postData.contents);
     var PH = ['id','name','price','note'];
-    var SH_ = ['id','ts','items','total','method','paid','note','pic'];
+    var SH_ = ['id','ts','items','subtotal','discount','total','method','paid','note','pic','promo','voucherCode'];
     var EH = ['id','date','cat','desc','qty','unit','price','by','note'];
+    var MH = ['id','name','type','value','productId','buyQty','getQty','code','active','expiry','limit','used'];
+    var OH = ['id','customer','phone','items','note','orderDate','dueDate','deposit','status','saleId'];
     if(d.action==='saveProduct'){
       saveRow('Produk', PH, d.data);
     } else if(d.action==='deleteProduct'){
@@ -399,6 +451,18 @@ function doPost(e){
       var desc = 'Penjualan Pugo ('+q+' pcs)'+(s.note?' - '+s.note:'');
       var dt = Utilities.formatDate(new Date(s.ts), 'Asia/Jakarta', 'yyyy-MM-dd');
       appendLedger(dt, 'Pemasukan', 'Pudot', desc, s.total, 0, s.pic);
+      if(s.voucherCode){
+        var promos = readRows('Promo', MH);
+        var match = promos.filter(function(p){ return p.code && String(p.code).toUpperCase()===String(s.voucherCode).toUpperCase(); })[0];
+        if(match){ match.used = (Number(match.used)||0) + 1; saveRow('Promo', MH, match); }
+      }
+    } else if(d.action==='savePO'){
+      var po = d.data;
+      saveRow('PO', OH, Object.assign({}, po, { items: JSON.stringify(po.items || []) }));
+    } else if(d.action==='savePromo'){
+      saveRow('Promo', MH, d.data);
+    } else if(d.action==='deletePromo'){
+      deleteRow('Promo', MH, d.id);
     } else if(d.action==='addExpense'){
       saveRow('Pengeluaran', EH, d.data);
       appendLedger(d.data.date, 'Pengeluaran', d.data.cat, d.data.desc, 0, d.data.qty*d.data.price, d.data.by);
@@ -419,6 +483,72 @@ function doPost(e){
     lock.releaseLock();
   }
 }`;
+
+// ===== PRE-ORDER (PO) =====
+function poTotal(po){return(po.items||[]).reduce((a,i)=>a+i.qty*i.price,0)}
+function poStatusLabel(po){if(po.status=='done')return['Selesai','var(--gd)'];if(po.status=='cancelled')return['Dibatalkan','var(--dn)'];
+ if(po.dueDate&&po.dueDate<today())return['Lewat jadwal','var(--dn)'];return['Menunggu','var(--mr)']}
+function vPO(){const sorted=[...(db.po||[])].sort((a,b)=>(a.status=='pending'?0:1)-(b.status=='pending'?0:1)||(a.dueDate||'').localeCompare(b.dueDate||''));
+ $('#v').innerHTML=`<button class="btn" style="width:100%;margin-bottom:10px" onclick="editPO()">+ Pesanan Baru (Pre-Order)</button>
+ <div class="list">${sorted.map(po=>{const[st,col]=poStatusLabel(po),T=poTotal(po),sisa=Math.max(0,T-(+po.deposit||0));return `<div class="card" onclick="editPO('${po.id}')"><div class="row"><b>${esc(po.customer)}</b><b style="color:${col}">${st}</b></div><span class="mu">${(po.items||[]).map(i=>i.qty+'× '+esc(i.name)).join(', ')}<br>Total ${R(T)}${po.deposit?' · DP '+R(po.deposit)+' · sisa '+R(sisa):''}${po.dueDate?' · ambil '+fd(po.dueDate):''}${pendingBadge(po.id)}</span></div>`}).join('')||`<div class="card emp mu"><img src="${MC}">Belum ada pesanan pre-order</div>`}</div>`}
+function editPO(id){const po=(db.po||[]).find(x=>x.id==id)||{items:[],status:'pending',orderDate:today()};
+ window._poItems=(po.items||[]).map(i=>Object.assign({},i));
+ mod(`<h3 style="margin-top:0">${id?'Pesanan: '+esc(po.customer):'Pesanan Baru'}</h3><label>Nama pelanggan</label><input id="qn" value="${esc(po.customer||'')}"><label>No. HP (opsional)</label><input id="qp" value="${esc(po.phone||'')}">
+ <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><div><label>Tanggal pesan</label><input id="qd" type="date" value="${po.orderDate||today()}"></div><div><label>Tanggal ambil/kirim</label><input id="qu" type="date" value="${po.dueDate||''}"></div></div>
+ <label>Tambah produk</label><div class="row" style="gap:6px;margin-bottom:8px"><select id="qsel" style="flex:1;margin:0">${db.products.map(p=>`<option value="${p.id}">${esc(p.name)} — ${R(p.price)}</option>`).join('')||'<option value="">Belum ada produk</option>'}</select><input id="qqty" type="number" value="1" min="1" style="width:70px;margin:0"><button class="btn g" onclick="addPOItem()">+</button></div>
+ <div id="qlist"></div>
+ <label>DP / uang muka (opsional)</label><input id="qdp" type="number" inputmode="numeric" value="${po.deposit||''}"><label>Catatan</label><input id="qn2" value="${esc(po.note||'')}">
+ <div class="row"><button class="btn g" onclick="cl()">Tutup</button>${id?`<button class="btn d" onclick="cancelPO('${id}')">Batalkan</button>`:''}<button class="btn" onclick="savePO('${id||''}')">Simpan</button></div>
+ ${id&&po.status=='pending'?`<button class="btn big" style="width:100%;margin-top:10px" onclick="checkoutPO('${id}')">💳 Selesaikan & Bayar</button>`:''}`);
+ renderPOItems()}
+function renderPOItems(){const items=window._poItems||[];const T=items.reduce((a,i)=>a+i.qty*i.price,0);
+ $('#qlist').innerHTML=(items.length?`<div class="card" style="margin-bottom:10px">${items.map((i,idx)=>`<div class="row" style="margin-bottom:4px"><span>${i.qty}× ${esc(i.name)}</span><span>${R(i.qty*i.price)} <button class="btn d" style="padding:4px 8px" onclick="rmPOItem(${idx})">✕</button></span></div>`).join('')}<div class="row" style="border-top:1px dashed var(--bd);padding-top:6px;margin-top:4px"><b>Total</b><b>${R(T)}</b></div></div>`:'<p class="mu">Belum ada produk ditambahkan</p>')}
+function addPOItem(){const sel=$('#qsel');if(!sel||!sel.value)return;const p=db.products.find(x=>x.id==sel.value);if(!p)return;const qty=Math.max(1,+$('#qqty').value||1);
+ window._poItems=window._poItems||[];const ex=window._poItems.find(i=>i.productId==p.id);if(ex)ex.qty+=qty;else window._poItems.push({productId:p.id,name:p.name,price:p.price,qty});renderPOItems()}
+function rmPOItem(idx){window._poItems.splice(idx,1);renderPOItems()}
+async function savePO(id){const customer=$('#qn').value.trim();if(!customer){toast('Isi nama pelanggan');return}
+ if(!(window._poItems||[]).length){toast('Tambahkan minimal 1 produk');return}
+ const po=(db.po||[]).find(x=>x.id==id)||{status:'pending'};
+ const data=Object.assign({},po,{id:id||uid(),customer,phone:$('#qp').value.trim(),orderDate:$('#qd').value,dueDate:$('#qu').value,items:window._poItems,deposit:+$('#qdp').value||0,note:$('#qn2').value.trim()});
+ db.po=db.po||[];const idx=db.po.findIndex(x=>x.id===data.id);if(idx>=0)db.po[idx]=data;else db.po.push(data);
+ cl();show();
+ try{await api('savePO',{data})}catch(e){enqueue('savePO',{data});toast('Tersimpan offline, akan sinkron otomatis')}}
+async function cancelPO(id){if(!confirm('Batalkan pesanan ini?'))return;const po=(db.po||[]).find(x=>x.id==id);if(!po)return;po.status='cancelled';cl();show();
+ try{await api('savePO',{data:po})}catch(e){enqueue('savePO',{data:po})}}
+function checkoutPO(id){const po=(db.po||[]).find(x=>x.id==id);if(!po)return;
+ cart={};(po.items||[]).forEach(i=>{if(db.products.find(p=>p.id==i.productId))cart[i.productId]=(cart[i.productId]||0)+i.qty});
+ if(!Object.keys(cart).length){toast('Produk di pesanan ini sudah tidak tersedia di katalog');return}
+ window._activePO=id;tab='kasir';cl();pay()}
+
+// ===== PROMO / VOUCHER =====
+function promoStatus(p){if(!p.active)return['Nonaktif','var(--mu)'];if(promoExpired(p))return['Kedaluwarsa','var(--dn)'];if(promoLimitReached(p))return['Habis','var(--dn)'];return['Aktif','var(--gd)']}
+function promoDesc(p){if(p.type=='percent')return 'Diskon '+(+p.value)+'%'+(p.code?'':' (otomatis)');
+ if(p.type=='amount')return 'Potongan '+R(p.value)+(p.code?'':' (otomatis)');
+ if(p.type=='bogo'){const pr=db.products.find(x=>x.id==p.productId);return 'Beli '+p.buyQty+' gratis '+p.getQty+' · '+esc(pr?pr.name:'produk dihapus')+(p.code?'':' (otomatis)')}
+ return ''}
+function vPromo(){$('#v').innerHTML=`<button class="btn" style="width:100%;margin-bottom:10px" onclick="editPromo()">+ Buat Promo/Voucher</button>
+ <div class="list">${(db.promos||[]).map(p=>{const[st,col]=promoStatus(p);return `<div class="card" onclick="editPromo('${p.id}')"><div class="row"><b>${esc(p.name)}</b><b style="color:${col}">${st}</b></div><span class="mu">${promoDesc(p)}${p.code?' · kode <b>'+esc(p.code)+'</b>':''}${p.limit?' · terpakai '+(+p.used||0)+'/'+p.limit:''}${p.expiry?' · s/d '+fd(p.expiry):''}</span></div>`}).join('')||`<div class="card emp mu"><img src="${MC}">Belum ada promo.<br>Buat diskon persen, potongan rupiah, buy 1 get 1, atau kode voucher.</div>`}</div>`}
+function editPromo(id){const p=(db.promos||[]).find(x=>x.id==id)||{type:'percent',active:true,buyQty:1,getQty:1};
+ mod(`<h3 style="margin-top:0">${id?'Ubah':'Buat'} Promo/Voucher</h3><label>Nama promo</label><input id="mn" value="${esc(p.name||'')}" placeholder="mis. Diskon Member, Promo 17an">
+ <label>Jenis</label><select id="mt" onchange="promoTypeUI()"><option value="percent" ${p.type=='percent'?'selected':''}>Diskon persen (%)</option><option value="amount" ${p.type=='amount'?'selected':''}>Potongan harga (Rp)</option><option value="bogo" ${p.type=='bogo'?'selected':''}>Buy X Get Y (produk tertentu)</option></select>
+ <div id="mbody"></div>
+ <label>Kode voucher (kosongkan supaya otomatis berlaku tanpa kode)</label><input id="mc" value="${esc(p.code||'')}" placeholder="mis. PUGO10" style="text-transform:uppercase">
+ <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><div><label>Berlaku sampai (opsional)</label><input id="mx" type="date" value="${p.expiry||''}"></div><div><label>Batas pemakaian (opsional)</label><input id="ml" type="number" inputmode="numeric" value="${p.limit||''}"></div></div>
+ <label style="display:flex;align-items:center;gap:8px;margin:4px 0 14px"><input type="checkbox" id="ma" style="width:auto;margin:0" ${p.active!==false?'checked':''}> Aktifkan promo ini</label>
+ <div class="row"><button class="btn g" onclick="cl()">Batal</button>${id?`<button class="btn d" onclick="delPromo('${id}')">Hapus</button>`:''}<button class="btn" onclick="savePromo('${id||''}')">Simpan</button></div>`);
+ window._pv=p;promoTypeUI()}
+function promoTypeUI(){const t=$('#mt').value,p=window._pv||{};
+ if(t=='bogo'){$('#mbody').innerHTML=`<label>Produk</label><select id="mp">${db.products.map(x=>`<option value="${x.id}" ${p.productId==x.id?'selected':''}>${esc(x.name)}</option>`).join('')||'<option value="">Belum ada produk</option>'}</select><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><div><label>Beli (pcs)</label><input id="mbq" type="number" inputmode="numeric" value="${p.buyQty||1}"></div><div><label>Gratis (pcs)</label><input id="mgq" type="number" inputmode="numeric" value="${p.getQty||1}"></div></div>`}
+ else{$('#mbody').innerHTML=`<label>${t=='percent'?'Besar diskon (%)':'Besar potongan (Rp)'}</label><input id="mv" type="number" inputmode="numeric" value="${p.value||''}" placeholder="${t=='percent'?'mis. 10':'mis. 5000'}">`}}
+async function savePromo(id){const name=$('#mn').value.trim();if(!name){toast('Isi nama promo');return}
+ const type=$('#mt').value,data={id:id||uid(),name,type,code:$('#mc').value.trim().toUpperCase(),expiry:$('#mx').value,limit:+$('#ml').value||0,active:$('#ma').checked,used:(window._pv&&window._pv.used)||0};
+ if(type=='bogo'){if(!$('#mp').value){toast('Pilih produk untuk promo ini');return}data.productId=$('#mp').value;data.buyQty=+$('#mbq').value||1;data.getQty=+$('#mgq').value||1;data.value=0}
+ else{if(!($('#mv').value>0)){toast('Isi besar diskon/potongan');return}data.value=+$('#mv').value;data.productId='';data.buyQty=0;data.getQty=0}
+ db.promos=db.promos||[];const idx=db.promos.findIndex(x=>x.id===data.id);if(idx>=0)db.promos[idx]=data;else db.promos.push(data);
+ cl();show();
+ try{await api('savePromo',{data})}catch(e){enqueue('savePromo',{data});toast('Tersimpan offline, akan sinkron otomatis')}}
+async function delPromo(id){if(!confirm('Hapus promo ini?'))return;db.promos=(db.promos||[]).filter(x=>x.id!=id);cl();show();
+ try{await api('deletePromo',{id})}catch(e){enqueue('deletePromo',{id});toast('Akan dihapus otomatis saat online')}}
 
 function vSet(){const qn=queue.length;
  $('#v').innerHTML=`<div class="card sec"><h4>🔗 Sumber Data (Google Sheets)</h4><label>URL Web App Apps Script</label><input id="su" value="${esc(cfg.backendUrl)}" placeholder="https://script.google.com/macros/s/.../exec"><label>Nama kamu (PIC, hanya di perangkat ini)</label><input id="sp" value="${esc(cfg.pic)}" placeholder="mis. Zaskia">
